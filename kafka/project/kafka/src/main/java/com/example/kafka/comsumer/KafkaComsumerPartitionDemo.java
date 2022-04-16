@@ -10,7 +10,7 @@ import org.apache.kafka.common.serialization.StringDeserializer;
 import java.time.Duration;
 import java.util.List;
 import java.util.Properties;
-
+// 消费者消费指定分区代码
 public class KafkaComsumerPartitionDemo {
     public static void main(String[] args) {
         Properties properties = new Properties();

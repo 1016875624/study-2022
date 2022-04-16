@@ -224,9 +224,13 @@ enable.idempotence=true
 
 ![数据传递的几种语义](img/image-20220411140356814.png)
 
+## 幂等性原理
 
+精确一次会用到幂等性，kafka集群中是如何确保幂等性的
 
+生产者在启动的时候会有对应的程序id，PID，生产者发送数据的到对应的主题分区，会有个分区id，发送数据的时候 生产者会维护一个**自增的序列号**，通过这三个作为一个主键，当有相同的主键消息提交的时候，kafka只会持久化1条 <PID,Partition,Sequence Number>
 
+kafka的幂等性只能保证在 **单个会话**，**单个分区**不重复
 
 ![精确1次的方法](img/image-20220411140733522.png)
 
@@ -243,6 +247,21 @@ enable.idempotence=true
 ## Kafka 单分区有序实现方法
 
 ![Kafka如何实现单分区有序](img/image-20220411143609070.png)
+
+kafka 可以保证单分区的数据是有序的，不能保证多分区的数据有序， 有序指的是，按照发送数据的顺序排序。
+
+kafka集群接收生产者发送数据的时候，目前可以最多缓存5个消息，发送数据的时候，假如1个序号没有接受到，大于这个序号的请求就会停住接收，等到丢失序号接受成功，再把大于丢失序号的消息缓存，缓存后，进行排序持久化到硬盘
+
+max.in.flight.requests.per.connection 这个属性代表可以在未接收返回状态的最大请求个数 最大5个
+
+配置参数
+
+```properties
+# 最大为5
+max.in.flight.request.per.connection=5 
+```
+
+
 
 
 
@@ -498,7 +517,35 @@ conpletedFetches队列中，消费者从这个队列进行抓取数据
 
 ### 单个消费者订阅主题示例
 
-```
+```java
+Properties properties = new Properties();
+// kafka集群地址
+properties.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
+// key反序列化器
+properties.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
+// value反序列化器
+properties.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
+// 消费者组id  //必填
+properties.put(ConsumerConfig.GROUP_ID_CONFIG, "test");
+
+properties.put(ConsumerConfig.PARTITION_ASSIGNMENT_STRATEGY_CONFIG, "org.apache.kafka.clients.consumer.RangeAssignor");
+
+// 是否启动自动提交offset
+properties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, true);
+// 设置自动提交间隔为1s
+properties.put(ConsumerConfig.AUTO_COMMIT_INTERVAL_MS_CONFIG, 1000);
+
+// 创建消费者
+KafkaConsumer<String, String> consumer = new KafkaConsumer<String, String>(properties);
+// 订阅主题
+consumer.subscribe(List.of("first"));
+
+while (true) {
+	ConsumerRecords<String, String> consumerRecords = consumer.poll(Duration.ofSeconds(10));
+	for (ConsumerRecord<String, String> consumerRecord : consumerRecords) {
+		System.out.println(consumerRecord);
+	}
+}
 ```
 
 
@@ -536,6 +583,7 @@ kafkaProducer.close();
 
 ```java
 // 消费者消费指定分区代码
+public class KafkaComsumerPartitionDemo {
     public static void main(String[] args) {
         Properties properties = new Properties();
         // kafka集群地址
@@ -549,8 +597,13 @@ kafkaProducer.close();
 
         // 创建消费者
         KafkaConsumer<String, String> consumer = new KafkaConsumer<String, String>(properties);
+
+        // 设置消费者订阅的分区
+        List<TopicPartition> partitions = List.of(new TopicPartition("second", 0));
+        consumer.assign(partitions);
+
         // 订阅主题
-        consumer.subscribe(List.of("first"));
+        // consumer.subscribe(List.of(""));
 
         while (true) {
             ConsumerRecords<String, String> consumerRecords = consumer.poll(Duration.ofSeconds(10));
@@ -559,6 +612,7 @@ kafkaProducer.close();
             }
         }
     }
+}
 ```
 
 
@@ -713,6 +767,164 @@ consumer.commitSync();
 ## 指定offset消费
 
 ![指定offset消费](img/image-20220415103323448.png)
+
+默认情况下，消费者是用最新的offset进行消费的，可以指定为从开始进行消费，不过kafka的数据存储是会自动清理的，因此这个从头开始消费的用处不会特别大
+
+配置项为
+
+```properties
+auto.offset.reset=earliest|latest|none
+```
+
+
+
+指定消费offset的代码
+
+```java
+public class KafkaConsumerSeek {
+    public static void main(String[] args) {
+        // 配置
+        Properties properties = new Properties();
+
+        // 设置kafka集群
+        properties.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
+
+        // key 反序列化器
+        properties.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
+
+        //value 反序列化器
+        properties.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
+
+        // 消费者组id
+        properties.put(ConsumerConfig.GROUP_ID_CONFIG, "test0");
+
+        // 创建消费者
+        KafkaConsumer<String, String> consumer = new KafkaConsumer<String, String>(properties);
+
+        consumer.subscribe(List.of("first"));
+
+        Set<TopicPartition> assignment = consumer.assignment();
+        // 如果为空 那么没有拉取到分区消费策略
+        while (ObjectUtils.isEmpty(assignment)) {
+            consumer.poll(Duration.ofSeconds(1));
+            assignment = consumer.assignment();
+        }
+
+        // 所有分区都按照100以后进行消费
+        // 已经消费过的数据是不能狗再次消费的
+        for (TopicPartition partition : assignment) {
+            consumer.seek(partition, 140);
+        }
+
+        while (true) {
+            ConsumerRecords<String, String> consumerRecords = consumer.poll(Duration.ofSeconds(10));
+            for (ConsumerRecord<String, String> consumerRecord : consumerRecords) {
+                System.out.println(consumerRecord);
+            }
+        }
+
+
+    }
+}
+```
+
+
+
+## kafka 从指定时间戳进行消费数据
+
+kafka 存储了一个时间索引，可以通过时间戳转换为对应的offset
+
+```java
+// 将时间转换为 offset
+Map<TopicPartition, Long> map = new HashMap<>();
+for (TopicPartition topicPartition : assignment) {
+	// 获取一天前的数据
+	// 指定时间戳对应的offset
+	map.put(topicPartition, System.currentTimeMillis() - 1 * 24 * 3600 * 1000);
+}
+Map<TopicPartition, OffsetAndTimestamp> timestampMap = consumer.offsetsForTimes(map);
+```
+
+完整示例
+
+```java
+public class KafkaConsumerSeekTimeStamp {
+    public static void main(String[] args) {
+        // 配置
+        Properties properties = new Properties();
+
+        // 设置kafka集群
+        properties.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
+
+        // key 反序列化器
+        properties.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
+
+        //value 反序列化器
+        properties.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
+
+        // 消费者组id
+        properties.put(ConsumerConfig.GROUP_ID_CONFIG, "test1");
+
+        // 创建消费者
+        KafkaConsumer<String, String> consumer = new KafkaConsumer<String, String>(properties);
+
+        consumer.subscribe(List.of("first"));
+
+        Set<TopicPartition> assignment = consumer.assignment();
+        // 如果为空 那么没有拉取到分区消费策略
+        while (ObjectUtils.isEmpty(assignment)) {
+            consumer.poll(Duration.ofSeconds(1));
+            assignment = consumer.assignment();
+        }
+
+        // 将时间转换为 offset
+        Map<TopicPartition, Long> map = new HashMap<>();
+        for (TopicPartition topicPartition : assignment) {
+            // 获取一天前的数据
+            // 指定时间戳对应的offset
+            map.put(topicPartition, System.currentTimeMillis() - 1 * 24 * 3600 * 1000);
+        }
+        Map<TopicPartition, OffsetAndTimestamp> timestampMap = consumer.offsetsForTimes(map);
+
+        // 所有分区都按照100以后进行消费
+        // 已经消费过的数据是不能狗再次消费的
+        for (TopicPartition partition : assignment) {
+//            consumer.seek(partition, 140);
+            // 对应时间的对应offset
+            consumer.seek(partition, timestampMap.get(partition).offset());
+        }
+
+        while (true) {
+            ConsumerRecords<String, String> consumerRecords = consumer.poll(Duration.ofSeconds(10));
+            for (ConsumerRecord<String, String> consumerRecord : consumerRecords) {
+                System.out.println(consumerRecord);
+            }
+        }
+    }
+}
+```
+
+## 消费者中的重复消费 漏消费
+
+![消费者中的重复消费 漏消费](img/image-20220415170303565.png)
+
+重复消费，就是已经消费的数据再次消费了，在自动提交offset的情况下，5s后自动提交offset，假如消费者已经消费了数据，但是未提交offset的情况下挂了，那么再次从kafka拉取数据的时候就会从上一次提交的offset重复消费。
+
+漏消费，offset设置为手动消费，在消息没有处理完成的时候，提交了offset，此时消费者挂了的情况下， 出现消息数据丢失。
+
+
+
+## 消费者如何提高吞吐量 数据积压
+
+![消费者如何提高吞吐量](img/image-20220415180136176.png)
+
+
+
+
+
+## 回顾
+
+![每日总结2](img/每日总结2.png)
 
 
 
